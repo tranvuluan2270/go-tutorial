@@ -1,6 +1,6 @@
 - Tạo bảng users trong database(mongodb) x
 - Tạo 5 users thông qua mongodb tool x
-- Viết API query tất cả user (users/get)
+- Viết API query tất cả user (users/get) x 
 - Phân trang cho API trên (users/get?page=1&limit=2)
 - Viết API user details (users/get/id) (detail của user thông qua id, id có thể là 1,2,3,...hoặc 1 đoạn string giống _id trong mongodb)
 - Viết API tạo user (users/create)
