@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/gorilla/mux"
 	"go.mongodb.org/mongo-driver/bson"
@@ -45,10 +46,10 @@ func main() {
 
 	// Initialize Gorilla Mux router
 	router := mux.NewRouter()
-	router.HandleFunc("/", helloHandler).Methods("GET")            // GET request
-	router.HandleFunc("/users", getAllUsersHandler).Methods("GET") // GET request
+	router.HandleFunc("/", helloHandler).Methods("GET")         // GET request
+	router.HandleFunc("/users", getUsersHandler).Methods("GET") // GET request
 
-	// Start the server on port 8080
+	// Start the server on port 80
 	// nil parameter is used to use the default router (net/http)
 	// router parameter is used to use the gorilla/mux router
 	fmt.Println("Server running at http://localhost:80")
@@ -59,12 +60,41 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "Hello World!")
 }
 
-func getAllUsersHandler(w http.ResponseWriter, r *http.Request) {
+func getUsersHandler(w http.ResponseWriter, r *http.Request) {
 	// Access the users collection from the database
 	usersCollection := client.Database("test-db").Collection("users")
 
+	// Get the page and limit query parameters for pagination
+	pageStr := r.URL.Query().Get("page")
+	limitStr := r.URL.Query().Get("limit")
+
+	var findOptions *options.FindOptions
+
+	// Check if the page and limit query parameters are provided
+	if pageStr != "" && limitStr != "" {
+		page, err := strconv.Atoi(pageStr)
+		if err != nil || page < 1 {
+			page = 1
+			// If there is no page query parameter, the default value is 1
+		}
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil || limit < 1 {
+			limit = 2
+			// If there is no limit query parameter, the default value is 2
+		}
+
+		// Calculate the number of documents to skip
+		skip := (page - 1) * limit
+
+		// Initialize findOptions with limit and skip
+		findOptions = options.Find()
+		findOptions.SetLimit(int64(limit))
+		findOptions.SetSkip(int64(skip))
+
+	}
+
 	// Get all users from the users collection
-	cursor, err := usersCollection.Find(context.TODO(), bson.M{})
+	cursor, err := usersCollection.Find(context.TODO(), bson.M{}, findOptions)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -86,6 +116,8 @@ func getAllUsersHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Return the users as JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(users)
+
 }
