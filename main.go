@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -19,13 +20,20 @@ const uri = "mongodb://localhost:27017/"
 var client *mongo.Client
 var err error
 
-// User table struct
+// User struct with ID, Name, and Email fields
 type User struct {
-	ID      string `json:"id" bson:"_id"`
-	Name    string `json:"name" bson:"name"`
-	Email   string `json:"email" bson:"email"`
-	Age     int    `json:"age" bson:"age"`
-	Address string `json:"address" bson:"address"`
+	ID    primitive.ObjectID `json:"id" bson:"_id"`
+	Name  string             `json:"name" bson:"name"`
+	Email string             `json:"email" bson:"email"`
+}
+
+// UserDetails struct with additional fields
+type UserDetails struct {
+	User    `bson:",inline"` // Include and map the fields from the User struct
+	Gender  string           `json:"gender" bson:"gender"`
+	Age     int              `json:"age" bson:"age"`
+	Address string           `json:"address" bson:"address"`
+	Phone   string           `json:"phone" bson:"phone"`
 }
 
 func main() {
@@ -48,6 +56,7 @@ func main() {
 	router := mux.NewRouter()
 	router.HandleFunc("/", helloHandler).Methods("GET")         // GET request
 	router.HandleFunc("/users", getUsersHandler).Methods("GET") // GET request
+	router.HandleFunc("/users/{id}", getUserDetailsHandler).Methods("GET")
 
 	// Start the server on port 80
 	// nil parameter is used to use the default router (net/http)
@@ -119,5 +128,46 @@ func getUsersHandler(w http.ResponseWriter, r *http.Request) {
 	// Return the users as JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(users)
+
+}
+
+func getUserDetailsHandler(w http.ResponseWriter, r *http.Request) {
+	// To get the user details, we need to get the user ID from the URL parameters and show more information about the user
+
+	// Access the users collection from the database
+	usersCollection := client.Database("test-db").Collection("users")
+
+	// Get the user ID from the URL parameters
+	// this id parameter is the value of the {id} path variable in the URL (a string)
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
+	objID, err := primitive.ObjectIDFromHex(id)
+
+	// Check if the ID is valid, if ID valid then find the user with the given ID, if not return an error and exit
+	if err != nil {
+		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	// Find the user with the given ID
+	var user UserDetails
+
+	err = usersCollection.FindOne(context.TODO(), bson.M{"_id": objID}).Decode(&user)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+
+			http.Error(w, "User not found", http.StatusNotFound)
+		} else {
+
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Return the user as JSON
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(user)
 
 }
