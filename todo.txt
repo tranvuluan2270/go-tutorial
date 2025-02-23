@@ -3,6 +3,6 @@
 - Viết API query tất cả user (users/get) x 
 - Phân trang cho API trên (users/get?page=1&limit=2) x
 - Viết API user details (users/get/id) (detail của user thông qua id, id có thể là 1,2,3,...hoặc 1 đoạn string giống _id trong mongodb) x
-- Viết API tạo user (users/create)
-- Viết API update user (users/update/id)
-- Viết API delete user (users/delete/id)
+- Viết API tạo user (users/create) x
+- Viết API update user (users/update/id) x
+- Viết API delete user (users/delete/id) x

@@ -54,9 +54,12 @@ func main() {
 
 	// Initialize Gorilla Mux router
 	router := mux.NewRouter()
-	router.HandleFunc("/", helloHandler).Methods("GET")         // GET request
-	router.HandleFunc("/users", getUsersHandler).Methods("GET") // GET request
+	router.HandleFunc("/", helloHandler).Methods("GET") // GET request
+	router.HandleFunc("/users", getUsersHandler).Methods("GET")
 	router.HandleFunc("/users/{id}", getUserDetailsHandler).Methods("GET")
+	router.HandleFunc("/users/create", createUserHandler).Methods("POST")        // POST request
+	router.HandleFunc("/users/update/{id}", updateUserHandler).Methods("PUT")    // PUT request
+	router.HandleFunc("/users/delete/{id}", deleteUserHandler).Methods("DELETE") // DELETE request
 
 	// Start the server on port 80
 	// nil parameter is used to use the default router (net/http)
@@ -103,7 +106,11 @@ func getUsersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get all users from the users collection
-	cursor, err := usersCollection.Find(context.TODO(), bson.M{}, findOptions)
+	cursor, err := usersCollection.Find(
+		context.TODO(),
+		bson.M{},
+		findOptions,
+	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -154,7 +161,11 @@ func getUserDetailsHandler(w http.ResponseWriter, r *http.Request) {
 	// Find the user with the given ID
 	var user UserDetails
 
-	err = usersCollection.FindOne(context.TODO(), bson.M{"_id": objID}).Decode(&user)
+	err = usersCollection.FindOne(
+		context.TODO(),
+		bson.M{"_id": objID},
+	).Decode(&user)
+
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 
@@ -170,4 +181,127 @@ func getUserDetailsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(user)
 
+}
+
+func createUserHandler(w http.ResponseWriter, r *http.Request) {
+	// Access the users collection from the database
+	usersCollection := client.Database("test-db").Collection("users")
+
+	// Create a new UserDetails struct to hold the incoming data
+	var newUser UserDetails
+
+	// Decode the incoming JSON request body into the newUser struct
+	err := json.NewDecoder(r.Body).Decode(&newUser)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Generate a new ObjectId for the user
+	newUser.ID = primitive.NewObjectID()
+
+	// Insert the new user into the users collection
+	_, err = usersCollection.InsertOne(
+		context.TODO(),
+		newUser,
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return the created user as JSON
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(newUser)
+
+}
+
+func updateUserHandler(w http.ResponseWriter, r *http.Request) {
+	// Access the users collection from the database
+	usersCollection := client.Database("test-db").Collection("users")
+
+	// Get the user ID from the URL parameters
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
+	objID, err := primitive.ObjectIDFromHex(id)
+
+	// Check if the ID is valid, if ID valid then find the user with the given ID, if not return an error and exit
+	if err != nil {
+		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	// Create a new UserDetails struct to hold the updated data
+	var updatedUser UserDetails
+
+	// Decode the incoming JSON request body into the updatedUser struct
+	err = json.NewDecoder(r.Body).Decode(&updatedUser)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Ensure the ID in the URL matches the ID in the request body
+	updatedUser.ID = objID
+
+	// Update the user in the users collection
+	result, err := usersCollection.ReplaceOne(
+		context.TODO(),
+		bson.M{"_id": objID},
+		updatedUser,
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if result.MatchedCount == 0 {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	// Return the updated user as JSON
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updatedUser)
+
+}
+
+func deleteUserHandler(w http.ResponseWriter, r *http.Request) {
+	// Access the users collection from the database
+	usersCollection := client.Database("test-db").Collection("users")
+
+	// Get the user ID from the URL parameters
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	// Delete the user from the users collection
+	result, err := usersCollection.DeleteOne(
+		context.TODO(),
+		bson.M{"_id": objID},
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Check if a user was actually deleted
+	if result.DeletedCount == 0 {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	// Return a success message
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "User successfully deleted",
+	})
 }
