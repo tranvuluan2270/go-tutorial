@@ -5,6 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
+
+	"github.com/go-playground/validator/v10"
+	"github.com/golang-jwt/jwt/v5"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"go-tutorial/models"
 
@@ -15,12 +21,14 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+// Handler struct contains the database client, database name, and router
 type Handler struct {
 	DB       *mongo.Client
 	Database string
 	Router   *mux.Router
 }
 
+// Response represents the structure of the response
 type Response struct {
 	Status  int         `json:"status"`
 	Message string      `json:"message,omitempty"`
@@ -68,7 +76,7 @@ func (h *Handler) GetUsers(w http.ResponseWriter, r *http.Request) {
 	defer cursor.Close(context.TODO())
 
 	// Create a slice to hold the users
-	var users []models.User
+	var users []models.BaseUser
 
 	// Decode the cursor into the users slice
 	if err := cursor.All(context.TODO(), &users); err != nil {
@@ -77,7 +85,11 @@ func (h *Handler) GetUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Respond with the users as JSON
-	respondWithJSON(w, http.StatusOK, users)
+	respondWithJSON(w, http.StatusOK, Response{
+		Status:  http.StatusOK,
+		Message: "Users fetched successfully",
+		Data:    users,
+	})
 }
 
 func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
@@ -119,83 +131,131 @@ func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Respond with the users as JSON
-	respondWithJSON(w, http.StatusOK, user)
-
-}
-
-func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
-	// Access the users collection from the database
-	usersCollection := h.DB.Database(h.Database).Collection("users")
-
-	// Create a new UserDetails struct to hold the incoming data
-	var newUser models.UserDetails
-
-	// Decode the incoming JSON request body into the newUser struct
-	err := json.NewDecoder(r.Body).Decode(&newUser)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	// Generate a new ObjectId for the user
-	newUser.ID = primitive.NewObjectID()
-
-	// Insert the new user into the users collection
-	_, err = usersCollection.InsertOne(context.TODO(), newUser)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Return the created user as JSON
-	respondWithJSON(w, http.StatusOK, newUser)
+	respondWithJSON(w, http.StatusOK, Response{
+		Status:  http.StatusOK,
+		Message: "User details fetched successfully",
+		Data:    user,
+	})
 
 }
 
 func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
-	// Access the users collection from the database
-	usersCollection := h.DB.Database(h.Database).Collection("users")
 
-	// Get the user ID from the URL parameters
+	// Get user ID from URL
 	vars := mux.Vars(r)
 	id := vars["id"]
 
 	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
 	objID, err := primitive.ObjectIDFromHex(id)
 
-	// Check if the ID is valid, if ID valid then find the user with the given ID, if not return an error and exit
 	if err != nil {
-		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  http.StatusBadRequest,
+			Message: "Invalid user ID",
+		})
 		return
 	}
 
-	// Create a new UserDetails struct to hold the updated data
-	var updatedUser models.UserDetails
-
-	// Decode the incoming JSON request body into the updatedUser struct
-	err = json.NewDecoder(r.Body).Decode(&updatedUser)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	// Parse request body
+	var updateReq models.UpdateUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&updateReq); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  http.StatusBadRequest,
+			Message: "Invalid request body",
+		})
 		return
 	}
 
-	// Ensure the ID in the URL matches the ID in the request body
-	updatedUser.ID = objID
-
-	// Update the user in the users collection
-	result, err := usersCollection.ReplaceOne(context.TODO(), bson.M{"_id": objID}, updatedUser)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Validate request
+	validate := validator.New()
+	if err := validate.Struct(updateReq); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  http.StatusBadRequest,
+			Message: "Validation failed",
+		})
 		return
 	}
+
+	// Build update document
+	update := bson.M{}
+	if updateReq.Name != "" {
+		update["name"] = updateReq.Name
+	}
+	if updateReq.Email != "" {
+		update["email"] = updateReq.Email
+	}
+	if updateReq.Gender != "" {
+		update["gender"] = updateReq.Gender
+	}
+	if updateReq.Age != 0 {
+		update["age"] = updateReq.Age
+	}
+	if updateReq.Address != "" {
+		update["address"] = updateReq.Address
+	}
+	if updateReq.Phone != "" {
+		update["phone"] = updateReq.Phone
+	}
+	if updateReq.Password != "" {
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updateReq.Password), bcrypt.DefaultCost)
+		if err != nil {
+			respondWithJSON(w, http.StatusInternalServerError, Response{
+				Status:  http.StatusInternalServerError,
+				Message: "Error processing password",
+			})
+			return
+		}
+		update["password"] = string(hashedPassword)
+	}
+
+	// Check if there are fields to update
+	if len(update) == 0 {
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  http.StatusBadRequest,
+			Message: "No fields to update provided",
+		})
+		return
+	}
+
+	// Update user in database
+	usersCollection := h.DB.Database(h.Database).Collection("users")
+	result, err := usersCollection.UpdateOne(
+		context.TODO(),
+		bson.M{"_id": objID},
+		bson.M{"$set": update},
+	)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, Response{
+			Status:  http.StatusInternalServerError,
+			Message: "Error updating user",
+		})
+		return
+	}
+
+	// Check if user was found and updated
 	if result.MatchedCount == 0 {
-		http.Error(w, "User not found", http.StatusNotFound)
+		respondWithJSON(w, http.StatusNotFound, Response{
+			Status:  http.StatusNotFound,
+			Message: "User not found",
+		})
 		return
 	}
 
-	// Return the updated user as JSON
-	respondWithJSON(w, http.StatusOK, updatedUser)
-
+	//Get the updated user
+	updatedUser := models.UserDetails{}
+	err = usersCollection.FindOne(context.TODO(), bson.M{"_id": objID}).Decode(&updatedUser)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, Response{
+			Status:  http.StatusInternalServerError,
+			Message: "Error getting updated user",
+		})
+		return
+	}
+	respondWithJSON(w, http.StatusOK, Response{
+		Status:  http.StatusOK,
+		Message: "User updated successfully",
+		Data:    updatedUser,
+	})
 }
 
 func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +287,184 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return a success message
-	respondWithJSON(w, http.StatusOK, map[string]string{"message": "User successfully deleted"})
+	respondWithJSON(w, http.StatusOK, Response{
+		Status:  http.StatusOK,
+		Message: "User successfully deleted",
+	})
+}
+
+func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
+	// Parse and validate the request body
+	var req models.CreateUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  http.StatusBadRequest,
+			Message: "Invalid request body",
+		})
+		return
+	}
+
+	// Validate the request
+	validate := validator.New()
+	if err := validate.Struct(req); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  http.StatusBadRequest,
+			Message: "Validation failed",
+			Data:    err.Error(),
+		})
+		return
+	}
+
+	// Check if user already exists
+	usersCollection := h.DB.Database(h.Database).Collection("users")
+	var existingUser models.UserDetails
+	err := usersCollection.FindOne(context.TODO(), bson.M{"email": req.Email}).Decode(&existingUser)
+	if err == nil {
+		respondWithJSON(w, http.StatusConflict, Response{
+			Status:  http.StatusConflict,
+			Message: "User with this email already exists",
+		})
+		return
+	}
+
+	// Hash the password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, Response{
+			Status:  http.StatusInternalServerError,
+			Message: "Error processing request",
+		})
+		return
+	}
+
+	// Create new user
+	newUser := models.UserDetails{
+		BaseUser: models.BaseUser{
+			ID:       primitive.NewObjectID(),
+			Name:     req.Name,
+			Email:    req.Email,
+			Password: string(hashedPassword),
+		},
+		Gender:  req.Gender,
+		Age:     req.Age,
+		Address: req.Address,
+		Phone:   req.Phone,
+	}
+
+	// Insert the user into the database
+	_, err = usersCollection.InsertOne(context.TODO(), newUser)
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, Response{
+			Status:  http.StatusInternalServerError,
+			Message: "Error creating user",
+		})
+		return
+	}
+
+	// Remove password from response
+	newUser.Password = ""
+
+	// Return success response
+	respondWithJSON(w, http.StatusCreated, Response{
+		Status:  http.StatusCreated,
+		Message: "User created successfully",
+		Data:    newUser,
+	})
+}
+
+func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+
+	// Parse and validate the request body
+	var req models.LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  http.StatusBadRequest,
+			Message: "Invalid request body",
+		})
+		return
+	}
+
+	// Validate the request
+	validate := validator.New()
+	if err := validate.Struct(req); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, Response{
+			Status:  http.StatusBadRequest,
+			Message: "Validation failed",
+			Data:    err.Error(),
+		})
+		return
+	}
+
+	// Find user by email
+	usersCollection := h.DB.Database(h.Database).Collection("users")
+	var user models.UserDetails
+	err := usersCollection.FindOne(context.TODO(), bson.M{"email": req.Email}).Decode(&user)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			respondWithJSON(w, http.StatusUnauthorized, Response{
+				Status:  http.StatusUnauthorized,
+				Message: "Invalid email or password",
+			})
+			return
+		}
+		respondWithJSON(w, http.StatusInternalServerError, Response{
+			Status:  http.StatusInternalServerError,
+			Message: "Error finding user",
+		})
+		return
+	}
+
+	// Verify password
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
+	if err != nil {
+		respondWithJSON(w, http.StatusUnauthorized, Response{
+			Status:  http.StatusUnauthorized,
+			Message: "Invalid email or password",
+		})
+		return
+	}
+
+	// Generate JWT token
+	token, err := GenerateJWT(user.ID.Hex())
+	if err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, Response{
+			Status:  http.StatusInternalServerError,
+			Message: "Error generating token",
+		})
+		return
+	}
+
+	// Remove password from response
+	user.Password = ""
+
+	// Return token and user info
+	respondWithJSON(w, http.StatusOK, Response{
+		Status:  http.StatusOK,
+		Message: "Login successful",
+		Data: models.LoginResponse{
+			Token: token,
+			User: models.UserResponse{
+				ID:    user.ID,
+				Name:  user.Name,
+				Email: user.Email,
+			},
+		},
+	})
+}
+
+// GenerateJWT generates a new JWT token for a user
+func GenerateJWT(userID string) (string, error) {
+	// Create the Claims
+	claims := jwt.MapClaims{
+		"user_id": userID,
+		"exp":     time.Now().Add(time.Hour * 24).Unix(), // Token expires in 24 hours
+	}
+
+	// Create token with claims
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Generate encoded token using the secret signing key
+	return token.SignedString([]byte("your-secret-key")) // Replace with your secret key
 }
 
 // Helper function for JSON responses
