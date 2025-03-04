@@ -8,6 +8,7 @@ type BaseUser struct {
 	Name     string             `json:"name" bson:"name" validate:"required,min=2,max=50"`
 	Email    string             `json:"email" bson:"email" validate:"required,email"`
 	Password string             `json:"-" bson:"password" validate:"required,min=6"`
+	Role     string             `json:"role" bson:"role" validate:"required,oneof=admin user"`
 }
 
 // UserDetails contains all user information
@@ -24,6 +25,7 @@ type CreateUserRequest struct {
 	Name     string `json:"name" validate:"required,min=2,max=50"`
 	Email    string `json:"email" validate:"required,email"`
 	Password string `json:"password" validate:"required,min=6"`
+	Role     string `json:"role" validate:"omitempty,oneof=admin user"` // Not required for signup (default is user)
 	Gender   string `json:"gender,omitempty"`
 	Age      int    `json:"age,omitempty" validate:"omitempty,gte=0,lte=150"`
 	Address  string `json:"address,omitempty"`
@@ -35,6 +37,7 @@ type UpdateUserRequest struct {
 	Name     string `json:"name,omitempty" validate:"omitempty,min=2,max=100"`
 	Email    string `json:"email,omitempty" validate:"omitempty,email"`
 	Password string `json:"password,omitempty" validate:"omitempty,min=6"`
+	Role     string `json:"role,omitempty" validate:"omitempty,oneof=admin user"`
 	Gender   string `json:"gender,omitempty" validate:"omitempty,oneof=male female other"`
 	Age      int    `json:"age,omitempty" validate:"omitempty,gte=0,lte=150"`
 	Address  string `json:"address,omitempty"`

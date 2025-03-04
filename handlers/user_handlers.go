@@ -304,6 +304,11 @@ func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set default role if not provided
+	if req.Role == "" {
+		req.Role = "user" // Default role
+	}
+
 	// Validate the request
 	validate := validator.New()
 	if err := validate.Struct(req); err != nil {
@@ -338,12 +343,14 @@ func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create new user
+	// Admin roles should be assigned manually or through a separate admin creation process
 	newUser := models.UserDetails{
 		BaseUser: models.BaseUser{
 			ID:       primitive.NewObjectID(),
 			Name:     req.Name,
 			Email:    req.Email,
 			Password: string(hashedPassword),
+			Role:     req.Role, // Default role
 		},
 		Gender:  req.Gender,
 		Age:     req.Age,
@@ -425,7 +432,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate JWT token
-	token, err := GenerateJWT(user.ID.Hex())
+	token, err := GenerateJWT(user.ID.Hex(), user.Role)
 	if err != nil {
 		respondWithJSON(w, http.StatusInternalServerError, Response{
 			Status:  http.StatusInternalServerError,
@@ -453,10 +460,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 // GenerateJWT generates a new JWT token for a user
-func GenerateJWT(userID string) (string, error) {
+func GenerateJWT(userID string, role string) (string, error) {
 	// Create the Claims
 	claims := jwt.MapClaims{
 		"user_id": userID,
+		"role":    role,
 		"exp":     time.Now().Add(time.Hour * 24).Unix(), // Token expires in 24 hours
 	}
 
