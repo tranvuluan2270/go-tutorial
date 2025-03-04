@@ -57,7 +57,7 @@ type LoginRequest struct {
 	Password string `json:"password" validate:"required"`
 }
 
-// LoginResponse is used for login responses
+// LoginResponse is used for login responses (user response with token but without password)
 type LoginResponse struct {
 	Token string       `json:"token"`
 	User  UserResponse `json:"user"`

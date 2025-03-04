@@ -16,7 +16,7 @@ func SetupRoutes(h *handlers.Handler) *mux.Router {
 
 	// Protected routes that require authentication
 	protected := router.PathPrefix("").Subrouter()
-	protected.Use(middleware.AuthMiddleware)
+	protected.Use(middleware.AuthMiddleware(h))
 
 	// Routes accessible to all users
 	protected.HandleFunc("/user/{id}", h.GetUserDetails).Methods("GET")

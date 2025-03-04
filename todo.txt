@@ -8,3 +8,11 @@
 - Viết API delete user (users/delete/id) x
 - Refactor code base x
 - Validation & Authentication x
+
+- response handler (handle function for response {data via data type, status, message}) x
+- error handler (handle function for error {status, message}) x
+- implement permissions for master admin, sub admin, user
+- handle permission when master admin, sub admin, user call api 
+- redis cache data users, products,... (pagination, filter, sort,...)
+- cron job update data (products, users,...) to redis if data expired (10 secound once time recall)
+- investigate type byte, []byte (encode, decode), pointer (*, &)

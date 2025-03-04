@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -23,80 +24,84 @@ import (
 
 // Handler struct contains the database client, database name, and router
 type Handler struct {
-	DB       *mongo.Client
-	Database string
-	Router   *mux.Router
+	DB           *mongo.Client
+	Database     string
+	Router       *mux.Router
+	ResponseHdlr *ResponseHandler
+	ErrorHdlr    *ErrorHandler
 }
 
-// Response represents the structure of the response
-type Response struct {
-	Status  int         `json:"status"`
-	Message string      `json:"message,omitempty"`
-	Data    interface{} `json:"data,omitempty"`
+// NewHandler creates a new handler with all dependencies
+func NewHandler(db *mongo.Client, database string) *Handler {
+	return &Handler{
+		DB:           db,
+		Database:     database,
+		ResponseHdlr: NewResponseHandler(),
+		ErrorHdlr:    NewErrorHandler(),
+	}
 }
 
 func (h *Handler) GetUsers(w http.ResponseWriter, r *http.Request) {
 	// Access the users collection from the database
 	usersCollection := h.DB.Database(h.Database).Collection("users")
 
-	// Get the page and limit query parameters for pagination
+	// Get page and limit query parameters
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
 
-	// Initialize the find options
-	var findOptions *options.FindOptions
+	// Set default values if not provided
+	page := 1
+	limit := 5
 
-	// Check if the page and limit query parameters are provided
-	if pageStr != "" && limitStr != "" {
-		page, err := strconv.Atoi(pageStr)
-		if err != nil || page < 1 {
-			page = 1
-			// If there is no page query parameter, the default value is 1
+	// Convert page and limit to integers if provided
+	if pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
 		}
-		limit, err := strconv.Atoi(limitStr)
-		if err != nil || limit < 1 {
-			limit = 2
-			// If there is no limit query parameter, the default value is 2
+	}
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
 		}
-		// Calculate the number of documents to skip
-		skip := (page - 1) * limit
-
-		// Initialize findOptions with limit and skip
-		findOptions = options.Find().
-			SetLimit(int64(limit)).
-			SetSkip(int64(skip))
 	}
 
-	// Get all users from the users collection
-	cursor, err := usersCollection.Find(context.TODO(), bson.M{}, findOptions)
+	// Get total count
+	total, err := usersCollection.CountDocuments(context.TODO(), bson.M{})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.ErrorHdlr.HandleInternalError(w, "Error counting users")
+		return
+	}
+
+	// Calculate skip
+	skip := (page - 1) * limit
+
+	// Create find options
+	findOptions := options.Find().
+		SetLimit(int64(limit)).
+		SetSkip(int64(skip))
+
+	// Find users
+	cursor, err := usersCollection.Find(context.TODO(), bson.M{}, findOptions)
+
+	if err != nil {
+		h.ErrorHdlr.HandleInternalError(w, "Error fetching users")
 		return
 	}
 	defer cursor.Close(context.TODO())
 
-	// Create a slice to hold the users
+	//
 	var users []models.BaseUser
-
-	// Decode the cursor into the users slice
 	if err := cursor.All(context.TODO(), &users); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.ErrorHdlr.HandleInternalError(w, "Error processing users data")
 		return
 	}
 
-	// Respond with the users as JSON
-	respondWithJSON(w, http.StatusOK, Response{
-		Status:  http.StatusOK,
-		Message: "Users fetched successfully",
-		Data:    users,
-	})
+	// Return a success response
+	h.ResponseHdlr.Paginated(w, "Users fetched successfully", users, page, limit, int(total))
 }
 
 func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 	// To get the user details, we need to get the user ID from the URL parameters and show more information about the user
-
-	// Access the users collection from the database
-	usersCollection := h.DB.Database(h.Database).Collection("users")
 
 	// Get the user ID from the URL parameters
 	// this id parameter is the value of the {id} path variable in the URL (a string)
@@ -105,74 +110,60 @@ func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 
 	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
 	objID, err := primitive.ObjectIDFromHex(id)
-
 	// Check if the ID is valid, if ID valid then find the user with the given ID, if not return an error and exit
 	if err != nil {
-		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		h.ErrorHdlr.HandleBadRequest(w, "Invalid user ID")
 		return
 	}
 
-	// Create a UserDetails struct to hold the user details
+	// Get user from database
 	var user models.UserDetails
+	err = h.DB.Database(h.Database).Collection("users").
+		FindOne(context.TODO(), bson.M{"_id": objID}).
+		Decode(&user)
 
-	// Find the user with the given ID
-	err = usersCollection.FindOne(context.TODO(), bson.M{"_id": objID}).Decode(&user)
-
-	// Check if the user was found
 	if err != nil {
-		// If the user was not found, return a 404 error
 		if err == mongo.ErrNoDocuments {
-			http.Error(w, "User not found", http.StatusNotFound)
+			// If the user was not found, return a 404 error
+			h.ErrorHdlr.HandleNotFound(w, "User not found")
 		} else {
 			// If there is an error, return a 500 error
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			h.ErrorHdlr.HandleInternalError(w, "Error fetching user details")
 		}
 		return
 	}
 
-	// Respond with the users as JSON
-	respondWithJSON(w, http.StatusOK, Response{
-		Status:  http.StatusOK,
-		Message: "User details fetched successfully",
-		Data:    user,
-	})
+	// Return a success response
+	h.ResponseHdlr.Success(w, "User details fetched successfully", user)
 
 }
 
 func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
-
 	// Get user ID from URL
 	vars := mux.Vars(r)
 	id := vars["id"]
 
 	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
 	objID, err := primitive.ObjectIDFromHex(id)
-
 	if err != nil {
-		respondWithJSON(w, http.StatusBadRequest, Response{
-			Status:  http.StatusBadRequest,
-			Message: "Invalid user ID",
-		})
+		// If the user ID is invalid, return a 400 error
+		h.ErrorHdlr.HandleBadRequest(w, "Invalid user ID format")
 		return
 	}
 
 	// Parse request body
 	var updateReq models.UpdateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&updateReq); err != nil {
-		respondWithJSON(w, http.StatusBadRequest, Response{
-			Status:  http.StatusBadRequest,
-			Message: "Invalid request body",
-		})
+		// If the request body is invalid, return a 400 error
+		h.ErrorHdlr.HandleBadRequest(w, "Invalid request body")
 		return
 	}
 
 	// Validate request
 	validate := validator.New()
 	if err := validate.Struct(updateReq); err != nil {
-		respondWithJSON(w, http.StatusBadRequest, Response{
-			Status:  http.StatusBadRequest,
-			Message: "Validation failed",
-		})
+		// If the request is invalid, return a 400 error
+		h.ErrorHdlr.HandleBadRequest(w, "Invalid request")
 		return
 	}
 
@@ -199,10 +190,8 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	if updateReq.Password != "" {
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updateReq.Password), bcrypt.DefaultCost)
 		if err != nil {
-			respondWithJSON(w, http.StatusInternalServerError, Response{
-				Status:  http.StatusInternalServerError,
-				Message: "Error processing password",
-			})
+			// If there is an error, return a 500 error
+			h.ErrorHdlr.HandleInternalError(w, "Error processing request")
 			return
 		}
 		update["password"] = string(hashedPassword)
@@ -210,10 +199,8 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	// Check if there are fields to update
 	if len(update) == 0 {
-		respondWithJSON(w, http.StatusBadRequest, Response{
-			Status:  http.StatusBadRequest,
-			Message: "No fields to update provided",
-		})
+		// If there are no fields to update, return a 400 error
+		h.ErrorHdlr.HandleBadRequest(w, "No fields to update")
 		return
 	}
 
@@ -225,19 +212,15 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		bson.M{"$set": update},
 	)
 	if err != nil {
-		respondWithJSON(w, http.StatusInternalServerError, Response{
-			Status:  http.StatusInternalServerError,
-			Message: "Error updating user",
-		})
+		// If there is an error, return a 500 error
+		h.ErrorHdlr.HandleInternalError(w, "Error updating user")
 		return
 	}
 
 	// Check if user was found and updated
 	if result.MatchedCount == 0 {
-		respondWithJSON(w, http.StatusNotFound, Response{
-			Status:  http.StatusNotFound,
-			Message: "User not found",
-		})
+		// If the user was not found, return a 404 error
+		h.ErrorHdlr.HandleNotFound(w, "User not found")
 		return
 	}
 
@@ -245,62 +228,52 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	updatedUser := models.UserDetails{}
 	err = usersCollection.FindOne(context.TODO(), bson.M{"_id": objID}).Decode(&updatedUser)
 	if err != nil {
-		respondWithJSON(w, http.StatusInternalServerError, Response{
-			Status:  http.StatusInternalServerError,
-			Message: "Error getting updated user",
-		})
+		// If there is an error, return a 500 error
+		h.ErrorHdlr.HandleInternalError(w, "Error getting updated user")
 		return
 	}
-	respondWithJSON(w, http.StatusOK, Response{
-		Status:  http.StatusOK,
-		Message: "User updated successfully",
-		Data:    updatedUser,
-	})
+	// Return a success response
+	h.ResponseHdlr.Success(w, "User updated successfully", updatedUser)
 }
 
 func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
-	// Access the users collection from the database
-	usersCollection := h.DB.Database(h.Database).Collection("users")
-
-	// Get the user ID from the URL parameters
+	// Get user ID from URL
 	vars := mux.Vars(r)
 	id := vars["id"]
 
 	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
-		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		h.ErrorHdlr.HandleBadRequest(w, "Invalid user ID")
 		return
 	}
 
-	// Delete the user from the users collection
-	result, err := usersCollection.DeleteOne(context.TODO(), bson.M{"_id": objID})
+	// Delete user from database
+	result, err := h.DB.Database(h.Database).Collection("users").
+		DeleteOne(context.TODO(), bson.M{"_id": objID})
+
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// If there is an error, return a 500 error
+		h.ErrorHdlr.HandleInternalError(w, "Error deleting user")
 		return
 	}
 
-	// Check if a user was actually deleted
 	if result.DeletedCount == 0 {
-		http.Error(w, "User not found", http.StatusNotFound)
+		// If the user was not found, return a 404 error
+		h.ErrorHdlr.HandleNotFound(w, "User not found")
 		return
 	}
 
-	// Return a success message
-	respondWithJSON(w, http.StatusOK, Response{
-		Status:  http.StatusOK,
-		Message: "User successfully deleted",
-	})
+	// Return a success response
+	h.ResponseHdlr.Success(w, "User successfully deleted", nil)
 }
 
 func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
 	// Parse and validate the request body
 	var req models.CreateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondWithJSON(w, http.StatusBadRequest, Response{
-			Status:  http.StatusBadRequest,
-			Message: "Invalid request body",
-		})
+		// If the request body is invalid, return a 400 error
+		h.ErrorHdlr.HandleBadRequest(w, "Invalid request body")
 		return
 	}
 
@@ -312,33 +285,33 @@ func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
 	// Validate the request
 	validate := validator.New()
 	if err := validate.Struct(req); err != nil {
-		respondWithJSON(w, http.StatusBadRequest, Response{
-			Status:  http.StatusBadRequest,
-			Message: "Validation failed",
-			Data:    err.Error(),
-		})
+		var validationErrors []ErrorDetail
+		for _, err := range err.(validator.ValidationErrors) {
+			validationErrors = append(validationErrors, ErrorDetail{
+				Field:   err.Field(),
+				Message: formatValidationError(err),
+			})
+		}
+		h.ErrorHdlr.HandleValidationError(w, validationErrors)
 		return
 	}
 
 	// Check if user already exists
-	usersCollection := h.DB.Database(h.Database).Collection("users")
 	var existingUser models.UserDetails
-	err := usersCollection.FindOne(context.TODO(), bson.M{"email": req.Email}).Decode(&existingUser)
+	err := h.DB.Database(h.Database).Collection("users").
+		FindOne(context.TODO(), bson.M{"email": req.Email}).
+		Decode(&existingUser)
 	if err == nil {
-		respondWithJSON(w, http.StatusConflict, Response{
-			Status:  http.StatusConflict,
-			Message: "User with this email already exists",
-		})
+		// If the user already exists, return a 400 error
+		h.ErrorHdlr.HandleBadRequest(w, "User with this email already exists")
 		return
 	}
 
 	// Hash the password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		respondWithJSON(w, http.StatusInternalServerError, Response{
-			Status:  http.StatusInternalServerError,
-			Message: "Error processing request",
-		})
+		// If there is an error, return a 500 error
+		h.ErrorHdlr.HandleInternalError(w, "Error processing request")
 		return
 	}
 
@@ -359,126 +332,114 @@ func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert the user into the database
-	_, err = usersCollection.InsertOne(context.TODO(), newUser)
+	_, err = h.DB.Database(h.Database).Collection("users").
+		InsertOne(context.TODO(), newUser)
+
 	if err != nil {
-		respondWithJSON(w, http.StatusInternalServerError, Response{
-			Status:  http.StatusInternalServerError,
-			Message: "Error creating user",
-		})
+		// If there is an error, return a 500 error
+		h.ErrorHdlr.HandleInternalError(w, "Error creating user")
 		return
 	}
-
-	// Remove password from response
-	newUser.Password = ""
-
-	// Return success response
-	respondWithJSON(w, http.StatusCreated, Response{
-		Status:  http.StatusCreated,
-		Message: "User created successfully",
-		Data:    newUser,
-	})
+	// Return a success response
+	h.ResponseHdlr.Created(w, "User created successfully", newUser)
 }
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
-
 	// Parse and validate the request body
 	var req models.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondWithJSON(w, http.StatusBadRequest, Response{
-			Status:  http.StatusBadRequest,
-			Message: "Invalid request body",
-		})
+		// If the request body is invalid, return a 400 error
+		h.ErrorHdlr.HandleBadRequest(w, "Invalid request body")
 		return
 	}
 
 	// Validate the request
 	validate := validator.New()
 	if err := validate.Struct(req); err != nil {
-		respondWithJSON(w, http.StatusBadRequest, Response{
-			Status:  http.StatusBadRequest,
-			Message: "Validation failed",
-			Data:    err.Error(),
-		})
+		var validationErrors []ErrorDetail
+		for _, err := range err.(validator.ValidationErrors) {
+			validationErrors = append(validationErrors, ErrorDetail{
+				Field:   err.Field(),
+				Message: formatValidationError(err),
+			})
+		}
+		h.ErrorHdlr.HandleValidationError(w, validationErrors)
 		return
 	}
 
 	// Find user by email
-	usersCollection := h.DB.Database(h.Database).Collection("users")
 	var user models.UserDetails
-	err := usersCollection.FindOne(context.TODO(), bson.M{"email": req.Email}).Decode(&user)
+	err := h.DB.Database(h.Database).Collection("users").
+		FindOne(context.TODO(), bson.M{"email": req.Email}).
+		Decode(&user)
+
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			respondWithJSON(w, http.StatusUnauthorized, Response{
-				Status:  http.StatusUnauthorized,
-				Message: "Invalid email or password",
-			})
+			// If the user was not found, return a 401 error
+			h.ErrorHdlr.HandleUnauthorized(w, "Invalid email or password")
 			return
 		}
-		respondWithJSON(w, http.StatusInternalServerError, Response{
-			Status:  http.StatusInternalServerError,
-			Message: "Error finding user",
-		})
+		// If there is an error, return a 500 error
+		h.ErrorHdlr.HandleInternalError(w, "Error finding user")
 		return
 	}
 
 	// Verify password
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
-		respondWithJSON(w, http.StatusUnauthorized, Response{
-			Status:  http.StatusUnauthorized,
-			Message: "Invalid email or password",
-		})
+		// If the password is incorrect, return a 401 error
+		h.ErrorHdlr.HandleUnauthorized(w, "Invalid email or password")
 		return
 	}
 
 	// Generate JWT token
-	token, err := GenerateJWT(user.ID.Hex(), user.Role)
+	token, err := h.generateJWT(user.ID.Hex(), user.Role)
 	if err != nil {
-		respondWithJSON(w, http.StatusInternalServerError, Response{
-			Status:  http.StatusInternalServerError,
-			Message: "Error generating token",
-		})
+		// If there is an error, return a 500 error
+		h.ErrorHdlr.HandleInternalError(w, "Error generating token")
 		return
 	}
 
-	// Remove password from response
-	user.Password = ""
-
-	// Return token and user info
-	respondWithJSON(w, http.StatusOK, Response{
-		Status:  http.StatusOK,
-		Message: "Login successful",
-		Data: models.LoginResponse{
-			Token: token,
-			User: models.UserResponse{
-				ID:    user.ID,
-				Name:  user.Name,
-				Email: user.Email,
-			},
+	// Create response
+	loginResponse := models.LoginResponse{
+		Token: token,
+		User: models.UserResponse{
+			ID:    user.ID,
+			Name:  user.Name,
+			Email: user.Email,
 		},
-	})
+	}
+	// Return a success response
+	h.ResponseHdlr.Success(w, "Login successful", loginResponse)
 }
 
-// GenerateJWT generates a new JWT token for a user
-func GenerateJWT(userID string, role string) (string, error) {
-	// Create the Claims
+// Helper function to generate JWT
+func (h *Handler) generateJWT(userID string, role string) (string, error) {
 	claims := jwt.MapClaims{
 		"user_id": userID,
 		"role":    role,
-		"exp":     time.Now().Add(time.Hour * 24).Unix(), // Token expires in 24 hours
+		"exp":     time.Now().Add(time.Hour * 24).Unix(),
 	}
-
 	// Create token with claims
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
 	// Generate encoded token using the secret signing key
-	return token.SignedString([]byte("your-secret-key")) // Replace with your secret key
+	return token.SignedString([]byte("your-secret-key"))
 }
 
-// Helper function for JSON responses
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-	response, _ := json.Marshal(payload)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(response)
+// Helper function to format validation errors
+func formatValidationError(err validator.FieldError) string {
+	switch err.Tag() {
+	case "required":
+		return "This field is required"
+	case "email":
+		return "Invalid email format"
+	case "min":
+		return fmt.Sprintf("Minimum length is %s", err.Param())
+	case "max":
+		return fmt.Sprintf("Maximum length is %s", err.Param())
+	case "oneof":
+		return fmt.Sprintf("Must be one of: %s", err.Param())
+	default:
+		return fmt.Sprintf("Validation failed on %s", err.Tag())
+	}
 }
