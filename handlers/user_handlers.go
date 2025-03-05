@@ -3,10 +3,8 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/golang-jwt/jwt/v5"
@@ -14,6 +12,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"go-tutorial/models"
+	"go-tutorial/utils"
 
 	"github.com/gorilla/mux"
 	"go.mongodb.org/mongo-driver/bson"
@@ -27,8 +26,8 @@ type Handler struct {
 	DB           *mongo.Client
 	Database     string
 	Router       *mux.Router
-	ResponseHdlr *ResponseHandler
-	ErrorHdlr    *ErrorHandler
+	ResponseHdlr *utils.ResponseHandler
+	ErrorHdlr    *utils.ErrorHandler
 }
 
 // NewHandler creates a new handler with all dependencies
@@ -36,8 +35,8 @@ func NewHandler(db *mongo.Client, database string) *Handler {
 	return &Handler{
 		DB:           db,
 		Database:     database,
-		ResponseHdlr: NewResponseHandler(),
-		ErrorHdlr:    NewErrorHandler(),
+		ResponseHdlr: utils.NewResponseHandler(),
+		ErrorHdlr:    utils.NewErrorHandler(),
 	}
 }
 
@@ -90,7 +89,7 @@ func (h *Handler) GetUsers(w http.ResponseWriter, r *http.Request) {
 	defer cursor.Close(context.TODO())
 
 	//
-	var users []models.BaseUser
+	var users []models.User
 	if err := cursor.All(context.TODO(), &users); err != nil {
 		h.ErrorHdlr.HandleInternalError(w, "Error processing users data")
 		return
@@ -101,18 +100,31 @@ func (h *Handler) GetUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
-	// To get the user details, we need to get the user ID from the URL parameters and show more information about the user
+	// Get claims from context
+	claims, ok := r.Context().Value("claims").(jwt.MapClaims)
+	if !ok {
+		h.ErrorHdlr.HandleUnauthorized(w, "Invalid token claims")
+		return
+	}
 
-	// Get the user ID from the URL parameters
-	// this id parameter is the value of the {id} path variable in the URL (a string)
+	// Get user ID and role from claims
+	currentUserID := claims["user_id"].(string)
+	userRole := claims["role"].(string)
+
+	// Get requested user ID from URL
 	vars := mux.Vars(r)
-	id := vars["id"]
+	requestedUserID := vars["id"]
 
-	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
-	objID, err := primitive.ObjectIDFromHex(id)
-	// Check if the ID is valid, if ID valid then find the user with the given ID, if not return an error and exit
+	// Convert requested ID to ObjectID
+	objID, err := primitive.ObjectIDFromHex(requestedUserID)
 	if err != nil {
 		h.ErrorHdlr.HandleBadRequest(w, "Invalid user ID")
+		return
+	}
+
+	// Check permissions
+	if userRole == "user" && currentUserID != requestedUserID {
+		h.ErrorHdlr.HandleForbidden(w, "Access denied")
 		return
 	}
 
@@ -124,27 +136,42 @@ func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			// If the user was not found, return a 404 error
 			h.ErrorHdlr.HandleNotFound(w, "User not found")
-		} else {
-			// If there is an error, return a 500 error
-			h.ErrorHdlr.HandleInternalError(w, "Error fetching user details")
+			return
 		}
+		h.ErrorHdlr.HandleInternalError(w, "Error fetching user details")
 		return
 	}
 
-	// Return a success response
+	// Return response
 	h.ResponseHdlr.Success(w, "User details fetched successfully", user)
 
 }
 
 func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
+	// Get claims from context
+	claims, ok := r.Context().Value("claims").(jwt.MapClaims)
+	if !ok {
+		h.ErrorHdlr.HandleUnauthorized(w, "Invalid token claims")
+		return
+	}
+
+	// Get current user ID and role from claims
+	currentUserID := claims["user_id"].(string)
+	userRole := claims["role"].(string)
+
 	// Get user ID from URL
 	vars := mux.Vars(r)
-	id := vars["id"]
+	requestedUserID := vars["id"]
+
+	// Check permissions - users can only update their own profile
+	if userRole == "user" && currentUserID != requestedUserID {
+		h.ErrorHdlr.HandleForbidden(w, "You can only update your own profile")
+		return
+	}
 
 	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
-	objID, err := primitive.ObjectIDFromHex(id)
+	objID, err := primitive.ObjectIDFromHex(requestedUserID)
 	if err != nil {
 		// If the user ID is invalid, return a 400 error
 		h.ErrorHdlr.HandleBadRequest(w, "Invalid user ID format")
@@ -285,11 +312,11 @@ func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
 	// Validate the request
 	validate := validator.New()
 	if err := validate.Struct(req); err != nil {
-		var validationErrors []ErrorDetail
+		var validationErrors []utils.ErrorDetail
 		for _, err := range err.(validator.ValidationErrors) {
-			validationErrors = append(validationErrors, ErrorDetail{
+			validationErrors = append(validationErrors, utils.ErrorDetail{
 				Field:   err.Field(),
-				Message: formatValidationError(err),
+				Message: utils.FormatValidationError(err),
 			})
 		}
 		h.ErrorHdlr.HandleValidationError(w, validationErrors)
@@ -318,7 +345,7 @@ func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
 	// Create new user
 	// Admin roles should be assigned manually or through a separate admin creation process
 	newUser := models.UserDetails{
-		BaseUser: models.BaseUser{
+		User: models.User{
 			ID:       primitive.NewObjectID(),
 			Name:     req.Name,
 			Email:    req.Email,
@@ -345,29 +372,14 @@ func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
-	// Parse and validate the request body
+	// Parse request
 	var req models.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// If the request body is invalid, return a 400 error
 		h.ErrorHdlr.HandleBadRequest(w, "Invalid request body")
 		return
 	}
 
-	// Validate the request
-	validate := validator.New()
-	if err := validate.Struct(req); err != nil {
-		var validationErrors []ErrorDetail
-		for _, err := range err.(validator.ValidationErrors) {
-			validationErrors = append(validationErrors, ErrorDetail{
-				Field:   err.Field(),
-				Message: formatValidationError(err),
-			})
-		}
-		h.ErrorHdlr.HandleValidationError(w, validationErrors)
-		return
-	}
-
-	// Find user by email
+	// Find user
 	var user models.UserDetails
 	err := h.DB.Database(h.Database).Collection("users").
 		FindOne(context.TODO(), bson.M{"email": req.Email}).
@@ -375,11 +387,9 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			// If the user was not found, return a 401 error
 			h.ErrorHdlr.HandleUnauthorized(w, "Invalid email or password")
 			return
 		}
-		// If there is an error, return a 500 error
 		h.ErrorHdlr.HandleInternalError(w, "Error finding user")
 		return
 	}
@@ -387,59 +397,27 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	// Verify password
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
-		// If the password is incorrect, return a 401 error
 		h.ErrorHdlr.HandleUnauthorized(w, "Invalid email or password")
 		return
 	}
 
-	// Generate JWT token
-	token, err := h.generateJWT(user.ID.Hex(), user.Role)
+	// Generate token
+	token, err := utils.GenerateJWT(user.ID.Hex(), user.Role)
 	if err != nil {
-		// If there is an error, return a 500 error
 		h.ErrorHdlr.HandleInternalError(w, "Error generating token")
 		return
 	}
 
 	// Create response
-	loginResponse := models.LoginResponse{
+	response := models.LoginResponse{
 		Token: token,
 		User: models.UserResponse{
 			ID:    user.ID,
 			Name:  user.Name,
 			Email: user.Email,
+			Role:  user.Role,
 		},
 	}
-	// Return a success response
-	h.ResponseHdlr.Success(w, "Login successful", loginResponse)
-}
 
-// Helper function to generate JWT
-func (h *Handler) generateJWT(userID string, role string) (string, error) {
-	claims := jwt.MapClaims{
-		"user_id": userID,
-		"role":    role,
-		"exp":     time.Now().Add(time.Hour * 24).Unix(),
-	}
-	// Create token with claims
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	// Generate encoded token using the secret signing key
-	return token.SignedString([]byte("your-secret-key"))
-}
-
-// Helper function to format validation errors
-func formatValidationError(err validator.FieldError) string {
-	switch err.Tag() {
-	case "required":
-		return "This field is required"
-	case "email":
-		return "Invalid email format"
-	case "min":
-		return fmt.Sprintf("Minimum length is %s", err.Param())
-	case "max":
-		return fmt.Sprintf("Maximum length is %s", err.Param())
-	case "oneof":
-		return fmt.Sprintf("Must be one of: %s", err.Param())
-	default:
-		return fmt.Sprintf("Validation failed on %s", err.Tag())
-	}
+	h.ResponseHdlr.Success(w, "Login successful", response)
 }

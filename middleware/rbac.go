@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"go-tutorial/utils"
 	"net/http"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -8,19 +9,21 @@ import (
 )
 
 func RoleMiddleware(allowedRoles ...string) mux.MiddlewareFunc {
+	errorHandler := utils.NewErrorHandler()
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Get claims from context (set by AuthMiddleware)
 			claims, ok := r.Context().Value("claims").(jwt.MapClaims)
 			if !ok {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				errorHandler.HandleUnauthorized(w, "Invalid token claims")
 				return
 			}
 
 			// Get user role from claims
 			userRole, ok := claims["role"].(string)
 			if !ok {
-				http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+				errorHandler.HandleUnauthorized(w, "Invalid token claims")
 				return
 			}
 
@@ -34,7 +37,7 @@ func RoleMiddleware(allowedRoles ...string) mux.MiddlewareFunc {
 			}
 
 			if !roleAllowed {
-				http.Error(w, "Forbidden: insufficient permissions", http.StatusForbidden)
+				errorHandler.HandleForbidden(w, "Insufficient role permissions")
 				return
 			}
 

@@ -3,21 +3,21 @@ package models
 import "go.mongodb.org/mongo-driver/bson/primitive"
 
 // BaseUser contains the basic user fields
-type BaseUser struct {
+type User struct {
 	ID       primitive.ObjectID `json:"id" bson:"_id"`
-	Name     string             `json:"name" bson:"name" validate:"required,min=2,max=50"`
-	Email    string             `json:"email" bson:"email" validate:"required,email"`
-	Password string             `json:"-" bson:"password" validate:"required,min=6"`
-	Role     string             `json:"role" bson:"role" validate:"required,oneof=admin user"`
+	Name     string             `json:"name" bson:"name"`
+	Email    string             `json:"email" bson:"email"`
+	Password string             `json:"-" bson:"password"`
+	Role     string             `json:"role" bson:"role"`
 }
 
 // UserDetails contains all user information
 type UserDetails struct {
-	BaseUser `bson:",inline"`
-	Gender   string `json:"gender,omitempty" bson:"gender"`
-	Age      int    `json:"age,omitempty" bson:"age" validate:"omitempty,gte=0,lte=150"`
-	Address  string `json:"address,omitempty" bson:"address"`
-	Phone    string `json:"phone,omitempty" bson:"phone"`
+	User    `bson:",inline"`
+	Gender  string `json:"gender,omitempty" bson:"gender"`
+	Age     int    `json:"age,omitempty" bson:"age" validate:"omitempty,gte=0,lte=150"`
+	Address string `json:"address,omitempty" bson:"address"`
+	Phone   string `json:"phone,omitempty" bson:"phone"`
 }
 
 // CreateUserRequest is used for user creation/signup requests
@@ -25,7 +25,7 @@ type CreateUserRequest struct {
 	Name     string `json:"name" validate:"required,min=2,max=50"`
 	Email    string `json:"email" validate:"required,email"`
 	Password string `json:"password" validate:"required,min=6"`
-	Role     string `json:"role" validate:"omitempty,oneof=admin user"` // Not required for signup (default is user)
+	Role     string `json:"role" validate:"required,oneof=master_admin sub_admin user"`
 	Gender   string `json:"gender,omitempty"`
 	Age      int    `json:"age,omitempty" validate:"omitempty,gte=0,lte=150"`
 	Address  string `json:"address,omitempty"`
@@ -49,6 +49,7 @@ type UserResponse struct {
 	ID    primitive.ObjectID `json:"id" bson:"_id"`
 	Name  string             `json:"name" bson:"name"`
 	Email string             `json:"email" bson:"email"`
+	Role  string             `json:"role" bson:"role"`
 }
 
 // LoginRequest is used for login requests
