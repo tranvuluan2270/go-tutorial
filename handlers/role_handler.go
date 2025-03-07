@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"go-tutorial/middleware"
 	"go-tutorial/models"
 	"go-tutorial/utils"
 	"net/http"
@@ -15,8 +16,8 @@ import (
 
 func (h *Handler) ListRoles(w http.ResponseWriter, r *http.Request) {
 	// Return all available roles and their permissions
-	roles := make(map[string][]models.Permission)
-	for role, permissions := range models.RolePermissions {
+	roles := make(map[string][]middleware.Permission)
+	for role, permissions := range middleware.RolePermissions {
 		roles[role] = permissions
 	}
 	h.ResponseHdlr.Success(w, "Roles retrieved successfully", roles)

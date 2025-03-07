@@ -3,8 +3,11 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/golang-jwt/jwt/v5"
@@ -19,6 +22,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"go-tutorial/cache"
 )
 
 // Handler struct contains the database client, database name, and router
@@ -41,18 +46,14 @@ func NewHandler(db *mongo.Client, database string) *Handler {
 }
 
 func (h *Handler) GetUsers(w http.ResponseWriter, r *http.Request) {
-	// Access the users collection from the database
-	usersCollection := h.DB.Database(h.Database).Collection("users")
+	ctx := r.Context()
 
-	// Get page and limit query parameters
+	// Get pagination parameters
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
-
-	// Set default values if not provided
 	page := 1
-	limit := 5
+	limit := 10
 
-	// Convert page and limit to integers if provided
 	if pageStr != "" {
 		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
 			page = p
@@ -64,38 +65,105 @@ func (h *Handler) GetUsers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get total count
-	total, err := usersCollection.CountDocuments(context.TODO(), bson.M{})
+	// Get basic filter parameters
+	role := r.URL.Query().Get("role")          // Filter by role
+	searchQuery := r.URL.Query().Get("search") // Search in name and email
+	sortBy := r.URL.Query().Get("sort")        // Possible values: name_asc, name_desc, email_asc, email_desc
+
+	// Create cache key
+	cacheKey := fmt.Sprintf("users:p%d:l%d:role%s:q%s:sort%s",
+		page, limit, role, searchQuery, sortBy)
+
+	// Try to get from cache
+	var cachedData struct {
+		Users []models.UserResponse `json:"users"`
+		Total int64                 `json:"total"`
+	}
+
+	err := cache.GetCache(ctx, cacheKey, &cachedData)
+	if err == nil {
+		w.Header().Set("X-Cache", "HIT")
+		h.ResponseHdlr.Paginated(w, "Users fetched from cache", cachedData.Users, page, limit, int(cachedData.Total))
+		return
+	}
+
+	w.Header().Set("X-Cache", "MISS")
+
+	// Build filter query
+	filterQuery := bson.M{}
+
+	// Add role filter if provided
+	if role != "" {
+		filterQuery["role"] = role
+	}
+
+	// Add search filter if provided (search in name and email)
+	if searchQuery != "" {
+		filterQuery["$or"] = []bson.M{
+			{"name": bson.M{"$regex": searchQuery, "$options": "i"}},
+			{"email": bson.M{"$regex": searchQuery, "$options": "i"}},
+		}
+	}
+
+	// Get total count with filters
+	usersCollection := h.DB.Database(h.Database).Collection("users")
+	total, err := usersCollection.CountDocuments(ctx, filterQuery)
 	if err != nil {
 		h.ErrorHdlr.HandleInternalError(w, "Error counting users")
 		return
 	}
 
-	// Calculate skip
+	// Calculate skip for pagination
 	skip := (page - 1) * limit
 
-	// Create find options
-	findOptions := options.Find().
+	// Build sort options
+	sortOptions := bson.D{}
+	switch sortBy {
+	case "name_asc":
+		sortOptions = append(sortOptions, bson.E{Key: "name", Value: 1})
+	case "name_desc":
+		sortOptions = append(sortOptions, bson.E{Key: "name", Value: -1})
+	case "email_asc":
+		sortOptions = append(sortOptions, bson.E{Key: "email", Value: 1})
+	case "email_desc":
+		sortOptions = append(sortOptions, bson.E{Key: "email", Value: -1})
+	default:
+		// Default sorting by name ascending
+		sortOptions = append(sortOptions, bson.E{Key: "name", Value: 1})
+	}
+
+	// Find users with filters and sort
+	opts := options.Find().
 		SetLimit(int64(limit)).
-		SetSkip(int64(skip))
+		SetSkip(int64(skip)).
+		SetSort(sortOptions)
 
-	// Find users
-	cursor, err := usersCollection.Find(context.TODO(), bson.M{}, findOptions)
-
+	cursor, err := usersCollection.Find(ctx, filterQuery, opts)
 	if err != nil {
 		h.ErrorHdlr.HandleInternalError(w, "Error fetching users")
 		return
 	}
-	defer cursor.Close(context.TODO())
+	defer cursor.Close(ctx)
 
-	//
-	var users []models.User
-	if err := cursor.All(context.TODO(), &users); err != nil {
+	var users []models.UserResponse
+	if err := cursor.All(ctx, &users); err != nil {
 		h.ErrorHdlr.HandleInternalError(w, "Error processing users data")
 		return
 	}
 
-	// Return a success response
+	// Store in cache
+	dataToCache := struct {
+		Users []models.UserResponse `json:"users"`
+		Total int64                 `json:"total"`
+	}{
+		Users: users,
+		Total: total,
+	}
+
+	if err := cache.SetCache(ctx, cacheKey, dataToCache, 5*time.Minute); err != nil {
+		log.Printf("Failed to cache users list: %v", err)
+	}
+
 	h.ResponseHdlr.Paginated(w, "Users fetched successfully", users, page, limit, int(total))
 }
 
@@ -115,7 +183,21 @@ func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	requestedUserID := vars["id"]
 
-	// Convert requested ID to ObjectID
+	// Try to get user from cache first
+	var user models.UserDetails
+	ctx := r.Context()
+	err := cache.GetCache(ctx, requestedUserID, &user)
+	if err == nil {
+		// Cache hit
+		w.Header().Set("X-Cache", "HIT")
+		h.ResponseHdlr.Success(w, "User details fetched from cache", user)
+		return
+	}
+
+	// Cache miss
+	w.Header().Set("X-Cache", "MISS")
+
+	// If not in cache, get from database
 	objID, err := primitive.ObjectIDFromHex(requestedUserID)
 	if err != nil {
 		h.ErrorHdlr.HandleBadRequest(w, "Invalid user ID")
@@ -128,10 +210,8 @@ func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user from database
-	var user models.UserDetails
 	err = h.DB.Database(h.Database).Collection("users").
-		FindOne(context.TODO(), bson.M{"_id": objID}).
+		FindOne(ctx, bson.M{"_id": objID}).
 		Decode(&user)
 
 	if err != nil {
@@ -143,155 +223,150 @@ func (h *Handler) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return response
-	h.ResponseHdlr.Success(w, "User details fetched successfully", user)
+	// Store in cache for future requests (cache for 30 minutes)
+	go func() {
+		if err := cache.SetCache(context.Background(), requestedUserID, user, 30*time.Minute); err != nil {
+			log.Printf("Failed to cache user data: %v", err)
+		}
+	}()
 
+	h.ResponseHdlr.Success(w, "User details fetched successfully", user)
 }
 
 func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
-	// Get claims from context
-	claims, ok := r.Context().Value("claims").(jwt.MapClaims)
-	if !ok {
-		h.ErrorHdlr.HandleUnauthorized(w, "Invalid token claims")
-		return
-	}
-
-	// Get current user ID and role from claims
-	currentUserID := claims["user_id"].(string)
-	userRole := claims["role"].(string)
-
-	// Get user ID from URL
+	ctx := r.Context()
 	vars := mux.Vars(r)
-	requestedUserID := vars["id"]
+	userID := vars["id"]
 
-	// Check permissions - users can only update their own profile
-	if userRole == "user" && currentUserID != requestedUserID {
-		h.ErrorHdlr.HandleForbidden(w, "You can only update your own profile")
-		return
-	}
-
-	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
-	objID, err := primitive.ObjectIDFromHex(requestedUserID)
+	objID, err := primitive.ObjectIDFromHex(userID)
 	if err != nil {
-		// If the user ID is invalid, return a 400 error
 		h.ErrorHdlr.HandleBadRequest(w, "Invalid user ID format")
 		return
 	}
 
-	// Parse request body
-	var updateReq models.UpdateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&updateReq); err != nil {
-		// If the request body is invalid, return a 400 error
+	var req models.UpdateUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.ErrorHdlr.HandleBadRequest(w, "Invalid request body")
 		return
 	}
 
 	// Validate request
 	validate := validator.New()
-	if err := validate.Struct(updateReq); err != nil {
-		// If the request is invalid, return a 400 error
+	if err := validate.Struct(req); err != nil {
 		h.ErrorHdlr.HandleBadRequest(w, "Invalid request")
 		return
 	}
 
 	// Build update document
 	update := bson.M{}
-	if updateReq.Name != "" {
-		update["name"] = updateReq.Name
+	if req.Name != "" {
+		update["name"] = req.Name
 	}
-	if updateReq.Email != "" {
-		update["email"] = updateReq.Email
+	if req.Email != "" {
+		update["email"] = req.Email
 	}
-	if updateReq.Gender != "" {
-		update["gender"] = updateReq.Gender
+	if req.Gender != "" {
+		update["gender"] = req.Gender
 	}
-	if updateReq.Age != 0 {
-		update["age"] = updateReq.Age
+	if req.Age != 0 {
+		update["age"] = req.Age
 	}
-	if updateReq.Address != "" {
-		update["address"] = updateReq.Address
+	if req.Address != "" {
+		update["address"] = req.Address
 	}
-	if updateReq.Phone != "" {
-		update["phone"] = updateReq.Phone
+	if req.Phone != "" {
+		update["phone"] = req.Phone
 	}
-	if updateReq.Password != "" {
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updateReq.Password), bcrypt.DefaultCost)
+	if req.Password != "" {
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 		if err != nil {
-			// If there is an error, return a 500 error
 			h.ErrorHdlr.HandleInternalError(w, "Error processing request")
 			return
 		}
 		update["password"] = string(hashedPassword)
 	}
 
-	// Check if there are fields to update
 	if len(update) == 0 {
-		// If there are no fields to update, return a 400 error
 		h.ErrorHdlr.HandleBadRequest(w, "No fields to update")
 		return
 	}
 
 	// Update user in database
-	usersCollection := h.DB.Database(h.Database).Collection("users")
-	result, err := usersCollection.UpdateOne(
-		context.TODO(),
-		bson.M{"_id": objID},
-		bson.M{"$set": update},
-	)
+	result, err := h.DB.Database(h.Database).Collection("users").
+		UpdateOne(ctx, bson.M{"_id": objID}, bson.M{"$set": update})
+
 	if err != nil {
-		// If there is an error, return a 500 error
 		h.ErrorHdlr.HandleInternalError(w, "Error updating user")
 		return
 	}
 
-	// Check if user was found and updated
 	if result.MatchedCount == 0 {
-		// If the user was not found, return a 404 error
 		h.ErrorHdlr.HandleNotFound(w, "User not found")
 		return
 	}
 
-	//Get the updated user
-	updatedUser := models.UserDetails{}
-	err = usersCollection.FindOne(context.TODO(), bson.M{"_id": objID}).Decode(&updatedUser)
+	// Invalidate cache
+	// 1. Delete specific user cache
+	detailCacheKey := fmt.Sprintf(cache.UserDetailPattern, userID)
+	if err := cache.DeleteCache(ctx, detailCacheKey); err != nil {
+		log.Printf("Failed to invalidate user detail cache: %v", err)
+	}
+
+	// 2. Delete all user list caches
+	if err := cache.DeleteByPattern(ctx, cache.UserListPattern); err != nil {
+		log.Printf("Failed to invalidate user list cache: %v", err)
+	}
+
+	// Get updated user
+	var updatedUser models.UserDetails
+	err = h.DB.Database(h.Database).Collection("users").
+		FindOne(ctx, bson.M{"_id": objID}).
+		Decode(&updatedUser)
+
 	if err != nil {
-		// If there is an error, return a 500 error
 		h.ErrorHdlr.HandleInternalError(w, "Error getting updated user")
 		return
 	}
-	// Return a success response
+
 	h.ResponseHdlr.Success(w, "User updated successfully", updatedUser)
 }
 
 func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
-	// Get user ID from URL
+	ctx := r.Context()
 	vars := mux.Vars(r)
-	id := vars["id"]
+	userID := vars["id"]
 
-	// Convert the id string to an ObjectId to match the _id field in MongoDB (ObjectId)
-	objID, err := primitive.ObjectIDFromHex(id)
+	objID, err := primitive.ObjectIDFromHex(userID)
 	if err != nil {
 		h.ErrorHdlr.HandleBadRequest(w, "Invalid user ID")
 		return
 	}
 
-	// Delete user from database
 	result, err := h.DB.Database(h.Database).Collection("users").
-		DeleteOne(context.TODO(), bson.M{"_id": objID})
+		DeleteOne(ctx, bson.M{"_id": objID})
 
 	if err != nil {
-		// If there is an error, return a 500 error
 		h.ErrorHdlr.HandleInternalError(w, "Error deleting user")
 		return
 	}
 
 	if result.DeletedCount == 0 {
-		// If the user was not found, return a 404 error
 		h.ErrorHdlr.HandleNotFound(w, "User not found")
 		return
 	}
 
-	// Return a success response
+	// Invalidate cache
+	// 1. Delete specific user cache
+	detailCacheKey := fmt.Sprintf(cache.UserDetailPattern, userID)
+	if err := cache.DeleteCache(ctx, detailCacheKey); err != nil {
+		log.Printf("Failed to invalidate user detail cache: %v", err)
+	}
+
+	// 2. Delete all user list caches
+	if err := cache.DeleteByPattern(ctx, cache.UserListPattern); err != nil {
+		log.Printf("Failed to invalidate user list cache: %v", err)
+	}
+
 	h.ResponseHdlr.Success(w, "User successfully deleted", nil)
 }
 

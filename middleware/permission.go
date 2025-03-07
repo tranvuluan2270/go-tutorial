@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"go-tutorial/models"
 	"go-tutorial/utils"
 	"net/http"
 
@@ -9,11 +8,75 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// Permission represents a single permission action
+type Permission string
+
+const (
+	// User permissions
+	PermissionListUsers  Permission = "list:users"
+	PermissionReadUser   Permission = "read:user"
+	PermissionUpdateUser Permission = "update:user"
+	PermissionDeleteUser Permission = "delete:user"
+
+	// Role permissions
+	PermissionListRoles  Permission = "list:roles"
+	PermissionAssignRole Permission = "assign:role"
+
+	// Product permissions
+	PermissionListProducts  Permission = "list:products"
+	PermissionReadProduct   Permission = "read:product"
+	PermissionCreateProduct Permission = "create:product"
+	PermissionUpdateProduct Permission = "update:product"
+	PermissionDeleteProduct Permission = "delete:product"
+)
+
+// RolePermissions maps roles to their permissions
+var RolePermissions = map[string][]Permission{
+	"master_admin": {
+		// User permissions
+		PermissionListUsers,
+		PermissionReadUser,
+		PermissionUpdateUser,
+		PermissionDeleteUser,
+
+		// Role permissions
+		PermissionListRoles,
+		PermissionAssignRole,
+
+		// Product permissions
+		PermissionListProducts,
+		PermissionReadProduct,
+		PermissionCreateProduct,
+		PermissionUpdateProduct,
+		PermissionDeleteProduct,
+	},
+	"sub_admin": {
+		// User permissions
+		PermissionListUsers,
+		PermissionReadUser,
+		PermissionUpdateUser,
+		PermissionListRoles,
+
+		// Product permissions
+		PermissionListProducts,
+		PermissionReadProduct,
+		PermissionCreateProduct,
+		PermissionUpdateProduct,
+	},
+	"user": {
+		// User permissions
+		PermissionReadUser,
+		PermissionUpdateUser,
+
+		// Product permissions
+		PermissionListProducts,
+		PermissionReadProduct,
+	},
+}
+
 // HasPermission checks if a role has a specific permission
-func HasPermission(role string, requiredPermission models.Permission) bool {
-
-	permissions, exists := models.RolePermissions[role]
-
+func HasPermission(role string, requiredPermission Permission) bool {
+	permissions, exists := RolePermissions[role]
 	if !exists {
 		return false
 	}
@@ -27,7 +90,7 @@ func HasPermission(role string, requiredPermission models.Permission) bool {
 }
 
 // RequirePermission middleware checks if the user has the required permission
-func RequirePermission(requiredPermission models.Permission) mux.MiddlewareFunc {
+func RequirePermission(requiredPermission Permission) mux.MiddlewareFunc {
 	errorHandler := utils.NewErrorHandler()
 
 	return func(next http.Handler) http.Handler {

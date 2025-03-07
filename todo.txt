@@ -13,6 +13,6 @@
 - error handler (handle function for error {status, message}) x
 - implement permissions for master admin, sub admin, user x
 - handle permission when master admin, sub admin, user call api x
-- redis cache data users, products,... (pagination, filter, sort,...)
+- redis cache data users, products,... (pagination, filter, sort,...) x
 - cron job update data (products, users,...) to redis if data expired (10 secound once time recall)
 - investigate type byte, []byte (encode, decode), pointer (*, &)

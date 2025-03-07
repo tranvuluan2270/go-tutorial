@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"go-tutorial/cache"
 	"go-tutorial/config"
 	"go-tutorial/database"
 	"go-tutorial/handlers"
@@ -18,7 +19,7 @@ type App struct {
 }
 
 func main() {
-	// Load configuration
+	// Load MongoDB configuration
 	cfg := config.LoadConfig()
 
 	// Initialize MongoDB connection
@@ -27,6 +28,18 @@ func main() {
 		log.Fatal(err)
 	}
 	defer client.Disconnect(context.TODO())
+
+	// Initialize Redis
+	redisConfig := cache.RedisConfig{
+		Host:     "localhost", // Change this to your Redis host
+		Port:     "6379",      // Change this to your Redis port
+		Password: "",          // Add password if required
+		DB:       0,
+	}
+
+	if err := cache.InitRedis(redisConfig); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
 
 	// Initialize application
 	app := &App{}
