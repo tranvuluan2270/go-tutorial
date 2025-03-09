@@ -11,6 +11,7 @@ import (
 	"go-tutorial/database"
 	"go-tutorial/handlers"
 	"go-tutorial/router"
+	"go-tutorial/utils"
 )
 
 type App struct {
@@ -40,6 +41,10 @@ func main() {
 	if err := cache.InitRedis(redisConfig); err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
+
+	// Initialize and start Redis update job
+	redisUpdateJob := utils.NewRedisUpdateJob(client, cfg.Database)
+	redisUpdateJob.Start()
 
 	// Initialize application
 	app := &App{}

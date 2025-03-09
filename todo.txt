@@ -14,5 +14,5 @@
 - implement permissions for master admin, sub admin, user x
 - handle permission when master admin, sub admin, user call api x
 - redis cache data users, products,... (pagination, filter, sort,...) x
-- cron job update data (products, users,...) to redis if data expired (10 secound once time recall)
-- investigate type byte, []byte (encode, decode), pointer (*, &)
+- cron job update data (products, users) to redis if data expired (10 seconds per recall) x
+- investigate type byte, []byte (encode, decode), pointer (*, &) x
